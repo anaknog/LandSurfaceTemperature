@@ -1,0 +1,203 @@
+var municipios = ee.FeatureCollection("projects/mestrado-anaknog/assets/SP_Municipios_2021_GEE"),
+    imageVisParam = {"opacity":1,"bands":["SR_B4","SR_B3","SR_B2"],"min":0.009825,"max":0.11220750000000002,"gamma":1};
+
+
+// Importar Municipios
+
+var SaoPaulo = municipios;
+var Aracatuba = municipios.filterMetadata('NM_MUN', 'equals','Araçatuba');//Done
+var Araraquara = municipios.filterMetadata('NM_MUN', 'equals','Araraquara');//Done
+var Bauru = municipios.filterMetadata('NM_MUN', 'equals','Bauru');//Done
+var Campinas = municipios.filterMetadata('NM_MUN', 'equals','Campinas');//Done
+var Marilia = municipios.filterMetadata('NM_MUN', 'equals','Marília');//Done
+var PresidentePrudente = municipios.filterMetadata('NM_MUN', 'equals','Presidente Prudente');//Done
+var RibeiraoPreto = municipios.filterMetadata('NM_MUN', 'equals','Ribeirão Preto');//Done
+var SaoJoseRioPreto = municipios.filterMetadata('NM_MUN', 'equals','São José do Rio Preto');//Done
+var SJC = municipios.filterMetadata('NM_MUN', 'equals','São José dos Campos');//Done
+var Sorocaba = municipios.filterMetadata('NM_MUN', 'equals','Sorocaba');//Done
+
+var Geometry = RibeiraoPreto;
+Map.addLayer(Geometry, {color: 'black'}, 'Cidade');
+Map.centerObject(Geometry,10);
+
+// Preparando as saídas e paletas
+
+// Falsa cor
+
+var paletteBands = {bands: ['SR_B4', 'SR_B3', 'SR_B2'],
+                    min: 0.0,
+                    max: 0.3,};
+
+// NDVI 
+
+var paletteNDVI = {min:-1, max:1, palette: ['FFFFFF', 'CE7E45', 'DF923D', 
+                  'F1B555', 'FCD163', '99B718','74A901', '66A000', '529400',
+                  '3E8601', '207401', '056201','004C00', '023B01', '012E01',
+                  '011D01', '011301']};
+                  
+var paletteNDVI2 = {min:-1, max:1, palette: ['red', 'yellow', 'green']};
+                  
+// TS 
+
+var paletteTs = {min: 20, max: 40, palette: ['040274', '040281', '0502a3', 
+                '0502b8', '0502ce', '0502e6','0602ff', '235cb1', '307ef3',
+                '269db1', '30c8e2', '32d3ef','3be285', '3ff38f', '86e26f',
+                '3ae237', 'b5e22e', 'd6e21f','fff705', 'ffd611', 'ffb613',
+                'ff8b13', 'ff6e08', 'ff500d','ff0000', 'de0101', 'c21301',
+                'a71001', '911003']};
+                 
+  var titulo = 'RibeiraoPreto_Umido_20191230';
+var pasta = 'TesteNuvem_LST';
+
+//NDVI
+
+var addBANDS = function(image) {
+  var ndvi = image.normalizedDifference(['SR_B5', 'SR_B4']).rename('NDVI');
+  return image.addBands(ndvi);
+};
+
+// Importando coleção
+var Landsat8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+.filterDate('2019-12-29', '2019-12-31')
+.filter(ee.Filter.calendarRange(10,3,'month'))
+  //.filter(ee.Filter.calendarRange(4,9,'month'))
+    .filterBounds(Geometry)
+    .map(function(image){return image.clip(Geometry)})
+    .map(addBANDS);
+    
+print(Landsat8);
+
+// Aplicando fatores de escala: https://developers.google.com/earth-engine/datasets/catalog/LANDSAT_LC08_C02_T1_L2
+function applyScaleFactors(image) {
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+  return image.addBands(opticalBands, null, true)
+              .addBands(thermalBands, null, true);}
+
+
+// Removendo pixels de nuvem: chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/https://d9-wret.s3.us-west-2.amazonaws.com/assets/palladium/production/s3fs-public/atoms/files/LSDS-1328_Landsat8-9-OLI-TIRS-C2-L2-DFCB-v6.pdf
+
+var QAPixel = function(image){
+  var qa = image.select('QA_PIXEL');
+  var cl = qa.bitwiseAnd(1 << 3).neq(0).rename('CLOUD').focalMean(100,'circle','meters');
+  var cs = qa.bitwiseAnd(1 << 4).neq(0).rename('CLOUD_SHADOW').focalMean(100,'circle','meters');
+  var cr = qa.bitwiseAnd(1 << 2).neq(0).rename('CLOUD_CIRRUS').focalMean(100,'circle','meters');
+  return image.addBands([cl,cs,cr]);
+};
+
+// Removendo nuvem da geometria
+var ReduceClouds = function(image){
+  var cloud_cover_region = image.select('CLOUD')
+    .multiply(100)
+    .reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: Geometry,
+      scale: 100,
+    }).get('CLOUD');
+   return image.set('CLOUD_COVER_REGION',cloud_cover_region);
+};
+
+// funcao para filtrar pixeis de nuvem
+var remove_clouds = function(image){
+  var cl = image.select('CLOUD');
+  return image.updateMask(cl.not()); 
+};
+var remove_shadow = function(image){
+  var cs = image.select('CLOUD_SHADOW');
+  return image.updateMask(cs.not()); 
+};
+var remove_cirrus = function(image){
+  var cr = image.select('CLOUD_SHADOW');
+  return image.updateMask(cr.not()); 
+};
+
+// Corrigir e filtrar Ts
+var L8Corrigido = Landsat8.map(applyScaleFactors)
+    .map(QAPixel)
+    .map(ReduceClouds)
+    .filterMetadata ('CLOUD_COVER','less_than',50)
+    .filterMetadata('CLOUD_COVER_REGION','less_than',20)
+    .map(remove_clouds)
+    .map(remove_shadow)
+    .map(remove_cirrus);
+    
+print(L8Corrigido);
+
+//Calculando médias por pixel
+
+// Media Ts
+var TsMean = L8Corrigido.select('ST_B10')
+  .reduce({reducer: ee.Reducer.mean()})
+  .subtract(273.15);
+
+// Media NDVI
+
+var NDVIMean = L8Corrigido.select('NDVI')
+  .reduce({reducer: ee.Reducer.mean()});
+print(NDVIMean);
+
+var cenaMean = L8Corrigido.mean();
+var NDVI = cenaMean.normalizedDifference(['SR_B5','SR_B4']);
+
+// add Layer
+Map.addLayer(L8Corrigido, paletteBands, 'True Color (432)');
+Map.addLayer(TsMean, paletteTs, 'Surface Temperature');
+//Map.addLayer(NDVIMean, paletteNDVI2, 'NDVI');
+Map.addLayer(NDVI, paletteNDVI2, 'NDVI');
+
+
+// Gráficos de distribuição 
+
+var chartNDVI =
+    ui.Chart.image.histogram({image: NDVI, region: Geometry, scale: 100})
+        .setSeriesNames(['NDVI_Mean'])
+        .setOptions({
+          title: 'NDVI Mean Histogram',
+          hAxis: {
+            title: 'NDVI',
+            titleTextStyle: {italic: false, bold: true},
+          },
+          vAxis:
+              {title: 'Count', titleTextStyle: {italic: false, bold: true}},
+          colors: ['cf513e', '1d6b99', 'f0af07']
+        });
+print(chartNDVI);
+
+
+
+var chartTs =
+    ui.Chart.image.histogram({image: TsMean, region: Geometry, scale: 100})
+        .setSeriesNames(['Ts_Mean'])
+        .setOptions({
+          title: 'Ts Mean Histogram',
+          hAxis: {
+            title: 'Ts',
+            titleTextStyle: {italic: false, bold: true},
+          },
+          vAxis:
+              {title: 'Count', titleTextStyle: {italic: false, bold: true}},
+          colors: ['cf513e', '1d6b99', 'f0af07']
+        });
+print(chartTs);
+
+
+//Exportação da cena para o Drive
+
+Export.image.toDrive({
+  image: NDVI,
+  description: titulo+'_NDVI',
+  folder: pasta,
+  region: Geometry.geometry().convexHull(),
+  fileFormat: 'GeoTIFF',
+  scale: 100
+});
+
+Export.image.toDrive({
+  image: TsMean,
+  description: titulo+'_Ts',
+  folder: pasta,
+  region: Geometry.geometry().convexHull(),
+  fileFormat: 'GeoTIFF',
+  scale: 100
+});
+
